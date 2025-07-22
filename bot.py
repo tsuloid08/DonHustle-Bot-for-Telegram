@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def setup_handlers(application):
+async def setup_handlers(application):
     """
     Set up all handlers for the bot application
     
@@ -44,7 +44,11 @@ def setup_handlers(application):
     theme_engine = ThemeEngine(ToneStyle.SERIOUS)
     
     # Register command handlers
-    register_command_handlers(application)
+    command_handler = register_command_handlers(application)
+    
+    # Load and register existing custom commands
+    if command_handler:
+        await command_handler.load_and_register_custom_commands(application)
     
     # Register message handlers for automatic quotes
     register_message_handlers(application, theme_engine)
@@ -98,8 +102,8 @@ def initialize_bot():
         # Create application with defaults
         application = Application.builder().token(bot_token).defaults(defaults).build()
         
-        # Set up all handlers
-        setup_handlers(application)
+        # Set up all handlers (this needs to be done after the application is created)
+        # We'll set up handlers in the main function after the application is ready
         
         logger.info("@donhustle_bot initialized successfully")
         return application
@@ -110,7 +114,7 @@ def initialize_bot():
         return None
 
 
-def main():
+async def main():
     """Main function to initialize and run the bot"""
     try:
         # Initialize the bot
@@ -119,6 +123,9 @@ def main():
         if not application:
             logger.error("Bot initialization failed. Exiting.")
             return
+        
+        # Set up all handlers (including loading custom commands)
+        await setup_handlers(application)
         
         # Log startup information
         logger.info("Starting @donhustle_bot...")
@@ -135,7 +142,7 @@ def main():
         ]
         
         logger.info(f"Starting bot polling with updates: {', '.join(allowed_updates)}")
-        application.run_polling(allowed_updates=allowed_updates)
+        await application.run_polling(allowed_updates=allowed_updates)
         
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
@@ -149,4 +156,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import asyncio
+    asyncio.run(main())

@@ -160,64 +160,68 @@
     - _Requirements: 8.1, 8.2, 8.4, 8.5_
 
 - [x] 11. Implement anti-spam and moderation features
+  - [x] 11.1 Create spam detection and filtering system
+    - Implement spam detection system with configurable word filters
+    - Create /filter add command for adding spam filter words
+    - Implement /filter remove command for removing spam filter words
+    - Add /filter list command for viewing all spam filters
+    - Implement automatic message deletion for detected spam
+    - Add user warning system with mafia-themed messages about "swimming with sharks"
+    - Create moderation action logging and user strike system
+    - Write unit tests for spam detection and moderation actions
+    - _Requirements: 10.1, 10.2, 10.3, 10.4_
+
+- [ ] 12. Implement file upload system for quotes
 
 
 
 
 
-  - Implement spam detection system with configurable word filters
-  - Create /filter add command for adding spam filter words
-  - Implement automatic message deletion for detected spam
-  - Add user warning system with mafia-themed messages about "swimming with sharks"
-  - Create moderation action logging and user strike system
-  - Write unit tests for spam detection and moderation actions
-  - _Requirements: 10.1, 10.2, 10.3, 10.4_
 
-- [ ] 12. Implement custom commands system
-  - Implement /addcommand command for creating custom bot commands
-  - Create custom command storage and retrieval from database
-  - Implement dynamic command handler registration for custom commands
-  - Add /customcommands command for listing available custom commands
-  - Create custom command execution with stored responses
-  - Write unit tests for custom command creation and execution
-  - _Requirements: 9.1, 9.2, 9.3_
+  - [ ] 12.1 Create file upload command handler
 
-- [ ] 13. Implement bot configuration and style management
-  - Implement /setstyle command for adjusting bot tone (serious/humorous)
-  - Create configuration storage system for per-chat settings
-  - Integrate style settings with ThemeEngine for dynamic response adjustment
-  - Add bot permission validation for administrative commands
-  - Create configuration validation and error handling
-  - Write unit tests for configuration management
-  - _Requirements: 11.1, 11.4_
 
-- [ ] 14. Create comprehensive test suite
-  - [ ] 14.1 Write unit tests for all components
-    - Create test fixtures for database operations with in-memory SQLite
-    - Write unit tests for all command handlers with mock Telegram updates
-    - Create unit tests for file processing with sample files
-    - Add unit tests for theme engine message generation
-    - _Requirements: All requirements for testing coverage_
-  
-  - [ ] 14.2 Create integration tests
-    - Write end-to-end tests for complete command workflows
-    - Create integration tests for database operations with real SQLite
-    - Add integration tests for file upload and processing
-    - Create tests for scheduler and background task functionality
-    - _Requirements: All requirements for integration testing_
 
-- [ ] 15. Implement deployment configuration
-  - Create environment variable configuration for bot token and settings
-  - Implement production database setup with persistent storage
-  - Create Docker configuration for containerized deployment
-  - Add process monitoring and automatic restart configuration
-  - Create deployment documentation with setup instructions
-  - _Requirements: 11.3_
 
-- [ ] 16. Add error handling and logging
-  - Implement comprehensive error handling for all bot operations
-  - Create mafia-themed error messages for all error scenarios
-  - Add structured logging for debugging and monitoring
-  - Implement graceful degradation for non-critical feature failures
-  - Create error recovery mechanisms for database and API failures
-  - _Requirements: 11.3_
+
+
+
+
+
+
+
+
+    - Implement /uploadquotes command for file processing
+    - Integrate with existing FileProcessor for .txt, .csv, and .json formats
+    - Add file download from Telegram API using context.bot.get_file()
+    - Implement file validation and error handling with mafia-themed error messages
+    - Add success confirmation with "Capo, las frases han sido añadidas al libro de la familia"
+    - Write integration tests for file upload workflow
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5_
+
+- [x] 13. Implement custom commands system
+
+
+
+
+  - [x] 13.1 Create custom command management
+
+
+
+
+    - Implement /addcommand command for creating custom bot commands
+    - Create custom command storage and retrieval from database
+    - Implement dynamic command handler registration for custom commands
+    - Add /customcommands command for listing available custom commands
+    - Create custom command execution with stored responses
+    - Write unit tests for custom command creation and execution
+    - _Requirements: 9.1, 9.2, 9.3_
+
+- [ ] 14. Implement bot configuration and style management
+  - [ ] 14.1 Create style and configuration commands
+    - Implement /setstyle command for adjusting bot tone (serious/humorous)
+    - Integrate style settings with existing ThemeEngine for dynamic response adjustment
+    - Add bot permission validation for administrative commands
+    - Create configuration validation and error handling
+    - Write unit tests for configuration management
+    - _Requirements: 11.1, 11.4_

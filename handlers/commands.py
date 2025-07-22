@@ -15,10 +15,11 @@ from telegram.ext import ContextTypes, CommandHandler as TelegramCommandHandler
 from telegram.constants import ParseMode
 
 from utils.theme import ThemeEngine, MessageType, ToneStyle
+from utils.file_processor import FileProcessor
 from database.manager import get_database_manager
 from database.repositories import (
     QuoteRepository, ConfigRepository, UserActivityRepository, 
-    MessageRepository, ReminderRepository
+    MessageRepository, ReminderRepository, CustomCommandRepository
 )
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,8 @@ class CommandHandler:
         self.user_activity_repository = UserActivityRepository(self.db_manager)
         self.message_repository = MessageRepository(self.db_manager)
         self.reminder_repository = ReminderRepository(self.db_manager)
+        self.custom_command_repository = CustomCommandRepository(self.db_manager)
+        self.file_processor = FileProcessor(self.theme_engine)
         self._command_registry = {}
     
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -246,12 +249,16 @@ class CommandHandler:
             if is_admin:
                 admin_commands = {
                     "welcome": "Configurar mensaje de bienvenida para nuevos miembros",
+                    "uploadquotes": "Subir archivo con frases (.txt, .csv, .json)",
                     "setquoteinterval": "Configurar frecuencia de frases",
                     "setstyle": "Ajustar tono del bot (serio/humorístico)",
                     "listquotes": "Ver todas las frases motivacionales",
                     "addhustle": "Agregar una nueva frase motivacional",
                     "deletequote": "Eliminar una frase específica por número",
-                    "clearquotes": "Eliminar todas las frases (requiere confirmación)"
+                    "clearquotes": "Eliminar todas las frases (requiere confirmación)",
+                    "addcommand": "Crear comando personalizado (/addcommand [nombre] [respuesta])",
+                    "customcommands": "Ver todos los comandos personalizados",
+                    "deletecommand": "Eliminar comando personalizado"
                 }
                 commands.update(admin_commands)
             
@@ -638,6 +645,154 @@ class CommandHandler:
             logger.error(f"Error setting quote interval: {e}")
             error_message = self.theme_engine.generate_message(MessageType.ERROR)
             await update.message.reply_text(error_message, parse_mode="Markdown")
+    
+    async def handle_uploadquotes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /uploadquotes command - process uploaded quote files
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        
+        if not chat or not user:
+            return
+        
+        # Check if user is admin in group chat
+        if chat.type != "private":
+            try:
+                chat_member = await context.bot.get_chat_member(chat.id, user.id)
+                if chat_member.status not in ["creator", "administrator"]:
+                    warning_message = self.theme_engine.generate_message(
+                        MessageType.WARNING,
+                        name=user.first_name
+                    )
+                    await update.message.reply_text(
+                        f"{warning_message}\n\nSolo los administradores pueden subir archivos de frases.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Error checking admin status: {e}")
+                return
+        
+        # Check if message has a document attachment
+        if not update.message.document:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "No se encontró ningún archivo adjunto",
+                "Adjunta un archivo .txt, .csv o .json con las frases y usa /uploadquotes"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        document = update.message.document
+        
+        # Validate file size (max 10MB)
+        max_file_size = 10 * 1024 * 1024  # 10MB in bytes
+        if document.file_size > max_file_size:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "El archivo es demasiado grande",
+                "El archivo debe ser menor a 10MB. Divide el archivo en partes más pequeñas."
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        # Validate file extension
+        file_name = document.file_name or "unknown"
+        file_ext = file_name.split('.')[-1].lower() if '.' in file_name else ""
+        
+        if file_ext not in ['txt', 'csv', 'json']:
+            error_msg = "Capo, ese archivo no es de la familia. Solo acepto .txt, .csv o .json."
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        try:
+            # Send processing message
+            processing_message = await update.message.reply_text(
+                "🔄 *Procesando archivo...*\n\nLa familia está revisando las frases, capo.",
+                parse_mode="Markdown"
+            )
+            
+            # Download the file
+            file = await context.bot.get_file(document.file_id)
+            file_path = f"temp_{document.file_id}.{file_ext}"
+            
+            await file.download_to_drive(file_path)
+            
+            # Process the file
+            quotes, error_message = self.file_processor.process_file(file_path)
+            
+            # Clean up temporary file
+            import os
+            try:
+                os.remove(file_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Could not remove temporary file {file_path}: {cleanup_error}")
+            
+            if error_message:
+                # Edit the processing message with error
+                await processing_message.edit_text(
+                    f"❌ *Error procesando archivo*\n\n{error_message}",
+                    parse_mode="Markdown"
+                )
+                return
+            
+            if not quotes:
+                # Edit the processing message with empty file warning
+                warning_msg = "⚠️ *Archivo vacío*\n\nEl archivo no contiene frases válidas, capo. Revisa el formato y contenido."
+                await processing_message.edit_text(warning_msg, parse_mode="Markdown")
+                return
+            
+            # Add quotes to database
+            added_count = 0
+            failed_count = 0
+            
+            for quote in quotes:
+                try:
+                    quote_id = self.quote_repository.add_quote(quote)
+                    if quote_id:
+                        added_count += 1
+                    else:
+                        failed_count += 1
+                except Exception as e:
+                    logger.error(f"Error adding quote '{quote[:50]}...': {e}")
+                    failed_count += 1
+            
+            # Edit the processing message with results
+            if added_count > 0:
+                success_message = "✅ *¡Capo, las frases han sido añadidas al libro de la familia!*"
+                
+                if failed_count > 0:
+                    result_text = f"{success_message}\n\n📊 *Resultados:*\n• Frases agregadas: *{added_count}*\n• Frases fallidas: *{failed_count}*"
+                else:
+                    result_text = f"{success_message}\n\n📊 *Total agregado:* *{added_count}* frases nuevas"
+                
+                # Add file info
+                result_text += f"\n\n📄 *Archivo procesado:* {file_name}"
+                
+                # Add iconic phrase
+                if self.theme_engine.get_tone() == ToneStyle.HUMOROUS:
+                    result_text += f"\n\n_{self.theme_engine.get_iconic_phrase()}_"
+                
+                await processing_message.edit_text(result_text, parse_mode="Markdown")
+            else:
+                error_msg = "❌ *Error*\n\nNo se pudo agregar ninguna frase al archivo de la familia. Revisa el formato del archivo."
+                await processing_message.edit_text(error_msg, parse_mode="Markdown")
+                
+        except Exception as e:
+            logger.error(f"Error processing file upload: {e}")
+            
+            # Try to edit the processing message, or send a new one if that fails
+            try:
+                error_message = self.theme_engine.generate_message(MessageType.ERROR)
+                await processing_message.edit_text(
+                    f"{error_message}\n\nHubo un problema procesando el archivo. Inténtalo de nuevo, capo.",
+                    parse_mode="Markdown"
+                )
+            except:
+                error_message = self.theme_engine.generate_message(MessageType.ERROR)
+                await update.message.reply_text(
+                    f"{error_message}\n\nHubo un problema procesando el archivo. Inténtalo de nuevo, capo.",
+                    parse_mode="Markdown"
+                )
     
     async def handle_setinactive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
@@ -1506,6 +1661,380 @@ class CommandHandler:
             error_message = self.theme_engine.generate_message(MessageType.ERROR)
             await update.message.reply_text(error_message, parse_mode="Markdown")
     
+    async def handle_addcommand(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /addcommand command - create custom bot commands
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        
+        if not chat or not user:
+            return
+        
+        # Check if user is admin in group chat
+        if chat.type != "private":
+            try:
+                chat_member = await context.bot.get_chat_member(chat.id, user.id)
+                if chat_member.status not in ["creator", "administrator"]:
+                    warning_message = self.theme_engine.generate_message(
+                        MessageType.WARNING,
+                        name=user.first_name
+                    )
+                    await update.message.reply_text(
+                        f"{warning_message}\n\nSolo los administradores pueden crear comandos personalizados para la familia.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Error checking admin status: {e}")
+                return
+        
+        if len(context.args) < 2:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "Faltan parámetros para crear el comando",
+                "Usa /addcommand [nombre] [respuesta] para crear un comando personalizado"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        command_name = context.args[0].lower().strip()
+        response_text = " ".join(context.args[1:]).strip()
+        
+        # Validate command name
+        if not re.match(r'^[a-zA-Z][a-zA-Z0-9_]*$', command_name):
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "Nombre de comando inválido",
+                "El nombre debe empezar con una letra y solo contener letras, números y guiones bajos"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        # Check if command name conflicts with existing bot commands
+        reserved_commands = {
+            "start", "help", "rules", "hustle", "motivate", "listquotes", 
+            "deletequote", "clearquotes", "addhustle", "setquoteinterval",
+            "tag", "searchtag", "save", "savedmessages", "remind", "reminders",
+            "setinactive", "disableinactive", "addcommand", "customcommands",
+            "deletecommand", "welcome", "setstyle", "filter"
+        }
+        
+        if command_name in reserved_commands:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                f"El comando '{command_name}' está reservado por la familia",
+                "Elige un nombre diferente para tu comando personalizado"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        # Validate response length
+        if len(response_text) < 1:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "La respuesta del comando no puede estar vacía",
+                "Proporciona una respuesta para el comando personalizado"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        if len(response_text) > 1000:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "La respuesta es demasiado larga",
+                "Mantén la respuesta bajo 1000 caracteres"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        try:
+            # Check if command already exists
+            existing_command = self.custom_command_repository.get_custom_command(chat.id, command_name)
+            
+            if existing_command:
+                # Update existing command
+                self.custom_command_repository.delete_custom_command(chat.id, command_name)
+                command_id = self.custom_command_repository.add_custom_command(
+                    chat.id, command_name, response_text, user.id
+                )
+                
+                success_message = self.theme_engine.generate_message(MessageType.SUCCESS)
+                await update.message.reply_text(
+                    f"{success_message}\n\n*Comando actualizado:* /{command_name}\n\n*Nueva respuesta:* {response_text[:100]}{'...' if len(response_text) > 100 else ''}",
+                    parse_mode="Markdown"
+                )
+            else:
+                # Create new command
+                command_id = self.custom_command_repository.add_custom_command(
+                    chat.id, command_name, response_text, user.id
+                )
+                
+                success_message = self.theme_engine.generate_message(MessageType.SUCCESS)
+                await update.message.reply_text(
+                    f"{success_message}\n\n*Nuevo comando creado:* /{command_name}\n\n*Respuesta:* {response_text[:100]}{'...' if len(response_text) > 100 else ''}",
+                    parse_mode="Markdown"
+                )
+            
+            # Register the command dynamically
+            await self._register_custom_command(context.application, chat.id, command_name)
+            
+        except Exception as e:
+            logger.error(f"Error creating custom command: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(
+                f"{error_message}\n\nNo se pudo crear el comando personalizado.",
+                parse_mode="Markdown"
+            )
+    
+    async def handle_customcommands(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /customcommands command - list all custom commands
+        """
+        chat = update.effective_chat
+        
+        if not chat:
+            return
+        
+        try:
+            custom_commands = self.custom_command_repository.get_all_custom_commands(chat.id)
+            
+            if not custom_commands:
+                if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                    no_commands_message = "📋 *COMANDOS PERSONALIZADOS*\n\nNo hay comandos personalizados configurados para esta familia."
+                else:
+                    no_commands_message = "📋 *ARSENAL DE COMANDOS PERSONALIZADOS*\n\n¡Esta familia aún no tiene comandos personalizados! ¿Qué esperan?"
+                
+                await update.message.reply_text(
+                    f"{no_commands_message}\n\nUsa `/addcommand [nombre] [respuesta]` para crear uno.",
+                    parse_mode="Markdown"
+                )
+                return
+            
+            # Format commands list
+            if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                header = "📋 *COMANDOS PERSONALIZADOS DE LA FAMILIA*\n\nComandos disponibles:"
+            else:
+                header = "📋 *ARSENAL DE COMANDOS PERSONALIZADOS*\n\n¡Aquí están las herramientas especiales de la familia!"
+            
+            command_lines = []
+            for cmd in custom_commands:
+                # Truncate long responses for display
+                response_preview = cmd.response
+                if len(response_preview) > 50:
+                    response_preview = response_preview[:47] + "..."
+                
+                command_lines.append(f"/{cmd.command_name} - {response_preview}")
+            
+            # Split into chunks if too many commands
+            max_commands_per_message = 15
+            if len(command_lines) <= max_commands_per_message:
+                commands_text = "\n\n".join(command_lines)
+                footer = f"\n\n_Total: {len(custom_commands)} comandos personalizados_"
+                
+                await update.message.reply_text(
+                    f"{header}\n\n{commands_text}{footer}",
+                    parse_mode="Markdown"
+                )
+            else:
+                # Send in chunks
+                for i in range(0, len(command_lines), max_commands_per_message):
+                    chunk = command_lines[i:i + max_commands_per_message]
+                    chunk_text = "\n\n".join(chunk)
+                    
+                    if i == 0:
+                        message = f"{header}\n\n{chunk_text}"
+                    else:
+                        message = f"📋 *Continuación...* 📋\n\n{chunk_text}"
+                    
+                    if i + max_commands_per_message >= len(command_lines):
+                        message += f"\n\n_Total: {len(custom_commands)} comandos personalizados_"
+                    
+                    await update.message.reply_text(message, parse_mode="Markdown")
+                    
+        except Exception as e:
+            logger.error(f"Error listing custom commands: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+    
+    async def handle_deletecommand(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /deletecommand command - delete a custom command
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        
+        if not chat or not user:
+            return
+        
+        # Check if user is admin in group chat
+        if chat.type != "private":
+            try:
+                chat_member = await context.bot.get_chat_member(chat.id, user.id)
+                if chat_member.status not in ["creator", "administrator"]:
+                    warning_message = self.theme_engine.generate_message(
+                        MessageType.WARNING,
+                        name=user.first_name
+                    )
+                    await update.message.reply_text(
+                        f"{warning_message}\n\nSolo los administradores pueden eliminar comandos personalizados.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Error checking admin status: {e}")
+                return
+        
+        if not context.args:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "No especificaste qué comando eliminar",
+                "Usa /deletecommand [nombre] para eliminar un comando personalizado"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        command_name = context.args[0].lower().strip()
+        
+        try:
+            # Check if command exists
+            existing_command = self.custom_command_repository.get_custom_command(chat.id, command_name)
+            
+            if not existing_command:
+                error_msg = self.theme_engine.format_error_with_suggestion(
+                    f"El comando '{command_name}' no existe",
+                    "Usa /customcommands para ver los comandos disponibles"
+                )
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
+                return
+            
+            # Delete the command
+            if self.custom_command_repository.delete_custom_command(chat.id, command_name):
+                success_message = self.theme_engine.generate_message(MessageType.SUCCESS)
+                
+                # Show preview of deleted command
+                response_preview = existing_command.response[:50] + "..." if len(existing_command.response) > 50 else existing_command.response
+                
+                await update.message.reply_text(
+                    f"{success_message}\n\n*Comando eliminado:* /{command_name}\n*Respuesta:* {response_preview}",
+                    parse_mode="Markdown"
+                )
+                
+                # Unregister the command dynamically (if possible)
+                await self._unregister_custom_command(context.application, command_name)
+            else:
+                error_message = self.theme_engine.generate_message(MessageType.ERROR)
+                await update.message.reply_text(
+                    f"{error_message}\n\nNo se pudo eliminar el comando.",
+                    parse_mode="Markdown"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error deleting custom command: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+    
+    async def handle_custom_command_execution(self, update: Update, context: ContextTypes.DEFAULT_TYPE, command_name: str) -> None:
+        """
+        Handle execution of a custom command
+        
+        Args:
+            update: Telegram update object
+            context: Telegram context object
+            command_name: Name of the custom command to execute
+        """
+        chat = update.effective_chat
+        
+        if not chat:
+            return
+        
+        try:
+            # Get the custom command from database
+            custom_command = self.custom_command_repository.get_custom_command(chat.id, command_name)
+            
+            if not custom_command:
+                # Command not found - this shouldn't happen if properly registered
+                logger.warning(f"Custom command '{command_name}' not found in database for chat {chat.id}")
+                return
+            
+            # Send the custom response with mafia theming
+            response = custom_command.response
+            
+            # Add some mafia flair to the response if it doesn't already have it
+            if not any(word in response.lower() for word in ["capo", "familia", "negocio", "don"]):
+                if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                    response = f"🎯 {response}"
+                else:
+                    response = f"🎯 {response}\n\n_- Un mensaje de la familia_"
+            
+            await update.message.reply_text(
+                response,
+                parse_mode="Markdown"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error executing custom command '{command_name}': {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+    
+    async def _register_custom_command(self, application, chat_id: int, command_name: str) -> None:
+        """
+        Register a custom command dynamically with the application
+        
+        Args:
+            application: Telegram bot application instance
+            chat_id: Chat ID where the command is available
+            command_name: Name of the command to register
+        """
+        try:
+            # Create a handler function for this specific custom command
+            async def custom_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+                # Only respond in the chat where the command was created
+                if update.effective_chat and update.effective_chat.id == chat_id:
+                    await self.handle_custom_command_execution(update, context, command_name)
+            
+            # Add the handler to the application
+            application.add_handler(TelegramCommandHandler(command_name, custom_handler))
+            
+            logger.info(f"Registered custom command '{command_name}' for chat {chat_id}")
+            
+        except Exception as e:
+            logger.error(f"Error registering custom command '{command_name}': {e}")
+    
+    async def _unregister_custom_command(self, application, command_name: str) -> None:
+        """
+        Unregister a custom command from the application
+        
+        Args:
+            application: Telegram bot application instance
+            command_name: Name of the command to unregister
+        """
+        try:
+            # Note: python-telegram-bot doesn't provide a direct way to remove handlers
+            # This is a limitation of the library. The handler will remain registered
+            # but the database lookup will fail, so it won't execute
+            logger.info(f"Custom command '{command_name}' marked for removal (handler remains registered)")
+            
+        except Exception as e:
+            logger.error(f"Error unregistering custom command '{command_name}': {e}")
+    
+    async def load_and_register_custom_commands(self, application) -> None:
+        """
+        Load all existing custom commands from database and register them
+        
+        Args:
+            application: Telegram bot application instance
+        """
+        try:
+            # Get all custom commands from all chats
+            with self.db_manager.get_cursor() as cursor:
+                cursor.execute("SELECT DISTINCT chat_id, command_name FROM custom_commands")
+                commands = cursor.fetchall()
+            
+            for row in commands:
+                chat_id = row['chat_id']
+                command_name = row['command_name']
+                await self._register_custom_command(application, chat_id, command_name)
+            
+            logger.info(f"Loaded and registered {len(commands)} custom commands")
+            
+        except Exception as e:
+            logger.error(f"Error loading custom commands: {e}")
+    
     def register_command(self, command_name: str, handler_func: Callable):
         """
         Register a command handler function
@@ -1532,6 +2061,9 @@ def register_command_handlers(application):
     
     Args:
         application: Telegram bot application instance
+        
+    Returns:
+        CommandHandler instance for further configuration
     """
     # Create command handler with theme engine
     handler = CommandHandler(theme_engine)
@@ -1549,6 +2081,7 @@ def register_command_handlers(application):
     application.add_handler(TelegramCommandHandler("clearquotes", handler.handle_clearquotes))
     application.add_handler(TelegramCommandHandler("addhustle", handler.handle_addhustle))
     application.add_handler(TelegramCommandHandler("setquoteinterval", handler.handle_setquoteinterval))
+    application.add_handler(TelegramCommandHandler("uploadquotes", handler.handle_uploadquotes))
     
     # Register message tagging commands
     application.add_handler(TelegramCommandHandler("tag", handler.handle_tag))
@@ -1566,6 +2099,11 @@ def register_command_handlers(application):
     application.add_handler(TelegramCommandHandler("setinactive", handler.handle_setinactive))
     application.add_handler(TelegramCommandHandler("disableinactive", handler.handle_disableinactive))
     
+    # Register custom command management commands
+    application.add_handler(TelegramCommandHandler("addcommand", handler.handle_addcommand))
+    application.add_handler(TelegramCommandHandler("customcommands", handler.handle_customcommands))
+    application.add_handler(TelegramCommandHandler("deletecommand", handler.handle_deletecommand))
+    
     # Register commands in the handler's registry
     handler.register_command("start", handler.handle_start)
     handler.register_command("rules", handler.handle_rules)
@@ -1577,11 +2115,18 @@ def register_command_handlers(application):
     handler.register_command("clearquotes", handler.handle_clearquotes)
     handler.register_command("addhustle", handler.handle_addhustle)
     handler.register_command("setquoteinterval", handler.handle_setquoteinterval)
+    handler.register_command("uploadquotes", handler.handle_uploadquotes)
     handler.register_command("tag", handler.handle_tag)
     handler.register_command("searchtag", handler.handle_searchtag)
     handler.register_command("save", handler.handle_save)
     handler.register_command("savedmessages", handler.handle_savedmessages)
     handler.register_command("remind", handler.handle_remind)
     handler.register_command("reminders", handler.handle_reminders)
+    handler.register_command("addcommand", handler.handle_addcommand)
+    handler.register_command("customcommands", handler.handle_customcommands)
+    handler.register_command("deletecommand", handler.handle_deletecommand)
     
     logger.info("Command handlers registered successfully")
+    
+    # Return the handler instance for further configuration
+    return handler
