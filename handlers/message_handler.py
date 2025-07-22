@@ -11,7 +11,7 @@ from telegram.ext import ContextTypes, MessageHandler, filters
 
 from utils.theme import ThemeEngine, MessageType, ToneStyle
 from database.manager import get_database_manager
-from database.repositories import ConfigRepository, QuoteRepository, UserActivityRepository
+from database.repositories import ConfigRepository, QuoteRepository, UserActivityRepository, SpamFilterRepository
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ class BotMessageHandler:
         self.config_repository = ConfigRepository(self.db_manager)
         self.quote_repository = QuoteRepository(self.db_manager)
         self.user_activity_repository = UserActivityRepository(self.db_manager)
+        self.spam_filter_repository = SpamFilterRepository(self.db_manager)
     
     async def check_and_send_interval_quote(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         """

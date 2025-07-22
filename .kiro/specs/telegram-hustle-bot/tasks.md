@@ -159,7 +159,12 @@
     - Write integration tests for inactive user management workflow
     - _Requirements: 8.1, 8.2, 8.4, 8.5_
 
-- [ ] 11. Implement anti-spam and moderation features
+- [x] 11. Implement anti-spam and moderation features
+
+
+
+
+
   - Implement spam detection system with configurable word filters
   - Create /filter add command for adding spam filter words
   - Implement automatic message deletion for detected spam

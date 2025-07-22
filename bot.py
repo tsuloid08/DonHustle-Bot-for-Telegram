@@ -12,7 +12,7 @@ from telegram.ext import Application, Defaults
 from telegram.constants import ParseMode
 
 # Import handlers
-from handlers import register_command_handlers, register_error_handler, register_welcome_handlers
+from handlers import register_command_handlers, register_error_handler, register_welcome_handlers, register_moderation_handlers
 from handlers.message_handler import register_message_handlers
 from database.manager import get_database_manager, close_database
 from utils.theme import ThemeEngine, ToneStyle
@@ -51,6 +51,9 @@ def setup_handlers(application):
     
     # Register welcome handlers
     register_welcome_handlers(application)
+    
+    # Register moderation handlers
+    register_moderation_handlers(application, theme_engine)
     
     # Register error handler
     register_error_handler(application)
