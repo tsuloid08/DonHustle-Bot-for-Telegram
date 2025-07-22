@@ -16,6 +16,7 @@ from handlers import register_command_handlers, register_error_handler, register
 from handlers.message_handler import register_message_handlers
 from database.manager import get_database_manager, close_database
 from utils.theme import ThemeEngine, ToneStyle
+from utils.scheduler import setup_scheduler
 
 # Load environment variables
 load_dotenv()
@@ -53,6 +54,9 @@ def setup_handlers(application):
     
     # Register error handler
     register_error_handler(application)
+    
+    # Set up reminder scheduler
+    setup_scheduler(application, theme_engine)
     
     logger.info("All handlers registered successfully")
 

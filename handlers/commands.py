@@ -5,7 +5,9 @@ Implements all bot commands with mafia-themed responses
 
 import logging
 import inspect
-from typing import Dict, List, Optional, Callable, Any, Type
+import re
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Callable, Any, Type, Tuple
 from abc import ABC, abstractmethod
 
 from telegram import Update, Chat, User
@@ -14,7 +16,10 @@ from telegram.constants import ParseMode
 
 from utils.theme import ThemeEngine, MessageType, ToneStyle
 from database.manager import get_database_manager
-from database.repositories import QuoteRepository, ConfigRepository, UserActivityRepository, MessageRepository
+from database.repositories import (
+    QuoteRepository, ConfigRepository, UserActivityRepository, 
+    MessageRepository, ReminderRepository
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +113,7 @@ class CommandHandler:
         self.config_repository = ConfigRepository(self.db_manager)
         self.user_activity_repository = UserActivityRepository(self.db_manager)
         self.message_repository = MessageRepository(self.db_manager)
+        self.reminder_repository = ReminderRepository(self.db_manager)
         self._command_registry = {}
     
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -248,6 +254,14 @@ class CommandHandler:
                     "clearquotes": "Eliminar todas las frases (requiere confirmación)"
                 }
                 commands.update(admin_commands)
+            
+            # Add reminder commands for all users
+            reminder_commands = {
+                "remind": "Programar un recordatorio (ej: /remind tomorrow 15:00 Reunión)",
+                "remind weekly": "Programar recordatorio semanal (ej: /remind weekly monday 10:00 Informe)",
+                "reminders": "Ver todos los recordatorios activos"
+            }
+            commands.update(reminder_commands)
         
         help_text = self.theme_engine.format_command_help(commands)
         
@@ -625,6 +639,184 @@ class CommandHandler:
             error_message = self.theme_engine.generate_message(MessageType.ERROR)
             await update.message.reply_text(error_message, parse_mode="Markdown")
     
+    async def handle_setinactive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /setinactive command - configure inactivity threshold
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        
+        if not chat or not user:
+            return
+        
+        # Check if user is admin in group chat
+        if chat.type != "private":
+            try:
+                chat_member = await context.bot.get_chat_member(chat.id, user.id)
+                if chat_member.status not in ["creator", "administrator"]:
+                    warning_message = self.theme_engine.generate_message(
+                        MessageType.WARNING,
+                        name=user.first_name
+                    )
+                    await update.message.reply_text(
+                        f"{warning_message}\n\nSolo los administradores pueden configurar el umbral de inactividad.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Error checking admin status: {e}")
+                return
+        
+        if not context.args:
+            # Show current inactivity threshold
+            try:
+                current_threshold = self.config_repository.get_config(
+                    chat.id, 
+                    "inactive_days", 
+                    "7"  # Default threshold
+                )
+                
+                inactive_enabled = self.config_repository.get_config(
+                    chat.id,
+                    "inactive_enabled",
+                    "true"
+                ).lower() == "true"
+                
+                status = "activado" if inactive_enabled else "desactivado"
+                
+                if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                    info_message = f"📊 *CONFIGURACIÓN ACTUAL*\n\nUmbral de inactividad: *{current_threshold}* días\nEstado: *{status}*"
+                else:
+                    info_message = f"📊 *¿CUÁNDO DORMIRÁN CON LOS PECES?*\n\nActualmente, los miembros inactivos por *{current_threshold}* días recibirán una advertencia\nEstado: *{status}*"
+                
+                await update.message.reply_text(
+                    f"{info_message}\n\nPara cambiar el umbral, usa: `/setinactive [días]`\n\n_Ejemplo: /setinactive 14_",
+                    parse_mode="Markdown"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error getting inactivity threshold: {e}")
+                error_message = self.theme_engine.generate_message(MessageType.ERROR)
+                await update.message.reply_text(error_message, parse_mode="Markdown")
+            return
+        
+        try:
+            days = int(context.args[0])
+            
+            if days < 1:
+                error_msg = self.theme_engine.format_error_with_suggestion(
+                    "El umbral es demasiado pequeño",
+                    "Usa un número mayor a 1 día para dar tiempo a los miembros"
+                )
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
+                return
+            
+            if days > 90:
+                error_msg = self.theme_engine.format_error_with_suggestion(
+                    "El umbral es demasiado grande",
+                    "Usa un número menor a 90 días para mantener el grupo activo"
+                )
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
+                return
+            
+            # Save the new threshold
+            self.config_repository.set_config(chat.id, "inactive_days", str(days))
+            
+            # Enable inactive user detection if it was disabled
+            self.config_repository.set_config(chat.id, "inactive_enabled", "true")
+            
+            success_message = self.theme_engine.generate_message(MessageType.SUCCESS)
+            
+            if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                config_message = f"Umbral configurado: los miembros inactivos por *{days}* días recibirán una advertencia."
+            else:
+                config_message = f"¡Perfecto! Ahora los miembros que estén *{days}* días sin actividad recibirán una advertencia. ¡La familia no tolera holgazanes!"
+            
+            await update.message.reply_text(
+                f"{success_message}\n\n{config_message}",
+                parse_mode="Markdown"
+            )
+            
+        except ValueError:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "El umbral debe ser un número válido",
+                "Usa /setinactive [días] con un número entero"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error setting inactivity threshold: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+    
+    async def handle_disableinactive(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /disableinactive command - disable automatic inactive user removal
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        
+        if not chat or not user:
+            return
+        
+        # Check if user is admin in group chat
+        if chat.type != "private":
+            try:
+                chat_member = await context.bot.get_chat_member(chat.id, user.id)
+                if chat_member.status not in ["creator", "administrator"]:
+                    warning_message = self.theme_engine.generate_message(
+                        MessageType.WARNING,
+                        name=user.first_name
+                    )
+                    await update.message.reply_text(
+                        f"{warning_message}\n\nSolo los administradores pueden desactivar la gestión de inactividad.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Error checking admin status: {e}")
+                return
+        
+        try:
+            # Check current status
+            current_status = self.config_repository.get_config(
+                chat.id,
+                "inactive_enabled",
+                "true"
+            ).lower()
+            
+            if current_status == "false":
+                # Already disabled
+                info_message = self.theme_engine.generate_message(
+                    MessageType.INFO,
+                    name=user.first_name
+                )
+                
+                await update.message.reply_text(
+                    f"{info_message}\n\nLa gestión de inactividad ya está desactivada. Usa `/setinactive [días]` para activarla nuevamente.",
+                    parse_mode="Markdown"
+                )
+                return
+            
+            # Disable inactive user management
+            self.config_repository.set_config(chat.id, "inactive_enabled", "false")
+            
+            success_message = self.theme_engine.generate_message(MessageType.SUCCESS)
+            
+            if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                config_message = "La gestión automática de usuarios inactivos ha sido desactivada."
+            else:
+                config_message = "¡Entendido! La familia será más tolerante con los miembros inactivos. Todos tienen una segunda oportunidad... por ahora."
+            
+            await update.message.reply_text(
+                f"{success_message}\n\n{config_message}",
+                parse_mode="Markdown"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error disabling inactive user management: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+    
     async def check_and_send_interval_quote(self, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Check if it's time to send an interval quote and send it if needed
@@ -673,6 +865,280 @@ class CommandHandler:
                 
         except Exception as e:
             logger.error(f"Error checking/sending interval quote: {e}")
+    
+    async def handle_remind(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /remind command - schedule reminders with date, time, and message
+        
+        Formats:
+        - /remind [date] [time] [message] - One-time reminder
+        - /remind weekly [day] [time] [message] - Weekly recurring reminder
+        
+        Examples:
+        - /remind tomorrow 15:00 Call the client
+        - /remind 25/07 14:30 Team meeting
+        - /remind weekly monday 10:00 Weekly report submission
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        
+        if not chat or not user:
+            return
+        
+        if not context.args or len(context.args) < 3:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "Formato incorrecto para el recordatorio",
+                "Usa /remind [fecha] [hora] [mensaje] o /remind weekly [día] [hora] [mensaje]"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+            return
+        
+        # Check if this is a recurring reminder
+        is_recurring = False
+        recurrence_pattern = None
+        
+        if context.args[0].lower() == "weekly":
+            is_recurring = True
+            recurrence_pattern = "weekly"
+            
+            if len(context.args) < 4:
+                error_msg = self.theme_engine.format_error_with_suggestion(
+                    "Formato incorrecto para recordatorio semanal",
+                    "Usa /remind weekly [día] [hora] [mensaje]"
+                )
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
+                return
+            
+            # Parse day of week
+            day_of_week = context.args[1].lower()
+            valid_days = {
+                "lunes": 0, "monday": 0, "l": 0, "mon": 0,
+                "martes": 1, "tuesday": 1, "m": 1, "tue": 1,
+                "miércoles": 2, "miercoles": 2, "wednesday": 2, "x": 2, "wed": 2,
+                "jueves": 3, "thursday": 3, "j": 3, "thu": 3,
+                "viernes": 4, "friday": 4, "v": 4, "fri": 4,
+                "sábado": 5, "sabado": 5, "saturday": 5, "s": 5, "sat": 5,
+                "domingo": 6, "sunday": 6, "d": 6, "sun": 6
+            }
+            
+            if day_of_week not in valid_days:
+                error_msg = self.theme_engine.format_error_with_suggestion(
+                    f"Día de la semana no válido: {day_of_week}",
+                    "Usa un día como 'lunes', 'martes', etc."
+                )
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
+                return
+            
+            # Calculate next occurrence of this day
+            today = datetime.now()
+            days_ahead = valid_days[day_of_week] - today.weekday()
+            if days_ahead <= 0:  # Target day already happened this week
+                days_ahead += 7
+            
+            target_date = today + timedelta(days=days_ahead)
+            date_str = target_date.strftime("%d/%m/%Y")
+            time_str = context.args[2]
+            message_text = " ".join(context.args[3:])
+            
+        else:
+            # One-time reminder
+            date_str = context.args[0]
+            time_str = context.args[1]
+            message_text = " ".join(context.args[2:])
+        
+        # Parse date
+        try:
+            remind_time = self._parse_reminder_datetime(date_str, time_str)
+            
+            # Validate reminder time is in the future
+            if remind_time <= datetime.now():
+                error_msg = self.theme_engine.format_error_with_suggestion(
+                    "El recordatorio debe ser para un momento futuro",
+                    "Especifica una fecha y hora en el futuro"
+                )
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
+                return
+            
+            # Create the reminder
+            reminder_id = self.reminder_repository.create_reminder(
+                chat_id=chat.id,
+                user_id=user.id,
+                message=message_text,
+                remind_time=remind_time,
+                is_recurring=is_recurring,
+                recurrence_pattern=recurrence_pattern
+            )
+            
+            if reminder_id:
+                success_message = self.theme_engine.generate_message(MessageType.SUCCESS)
+                
+                # Format reminder confirmation
+                formatted_date = remind_time.strftime("%d/%m/%Y")
+                formatted_time = remind_time.strftime("%H:%M")
+                
+                if is_recurring:
+                    day_names = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+                    day_name = day_names[remind_time.weekday()]
+                    confirmation = f"Recordatorio semanal programado para cada *{day_name}* a las *{formatted_time}*"
+                else:
+                    confirmation = f"Recordatorio programado para el *{formatted_date}* a las *{formatted_time}*"
+                
+                await update.message.reply_text(
+                    f"{success_message}\n\n{confirmation}\n\nMensaje: \"{message_text}\"\n\nLa familia te lo recordará a tiempo, capo.",
+                    parse_mode="Markdown"
+                )
+            else:
+                error_message = self.theme_engine.generate_message(MessageType.ERROR)
+                await update.message.reply_text(
+                    f"{error_message}\n\nNo se pudo crear el recordatorio. Inténtalo de nuevo.",
+                    parse_mode="Markdown"
+                )
+                
+        except ValueError as e:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                str(e),
+                "Usa formatos como '25/07' o 'tomorrow' para la fecha y '15:30' para la hora"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error creating reminder: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+    
+    async def handle_reminders(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /reminders command - list all active reminders
+        """
+        chat = update.effective_chat
+        
+        if not chat:
+            return
+        
+        try:
+            # Get all active reminders for this chat
+            reminders = self.reminder_repository.get_active_reminders(chat.id)
+            
+            if not reminders:
+                warning_message = self.theme_engine.generate_message(
+                    MessageType.WARNING,
+                    name="capo"
+                )
+                await update.message.reply_text(
+                    f"{warning_message}\n\nNo hay recordatorios activos para este chat.",
+                    parse_mode="Markdown"
+                )
+                return
+            
+            # Format reminders list with mafia theming
+            if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                header = "📅 *AGENDA DE LA FAMILIA* 📅\n\nRecordatorios pendientes:"
+            else:
+                header = "📅 *¡LA MEMORIA DE DON CORLEONE!* 📅\n\nPorque hasta los mafiosos necesitan recordatorios:"
+            
+            reminder_lines = []
+            for i, reminder in enumerate(reminders, 1):
+                # Format date and time
+                formatted_date = reminder.remind_time.strftime("%d/%m/%Y")
+                formatted_time = reminder.remind_time.strftime("%H:%M")
+                
+                if reminder.is_recurring:
+                    day_names = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+                    day_name = day_names[reminder.remind_time.weekday()]
+                    time_str = f"Cada {day_name} a las {formatted_time}"
+                else:
+                    time_str = f"{formatted_date} a las {formatted_time}"
+                
+                reminder_lines.append(f"{i}. *{time_str}*: {reminder.message}")
+            
+            reminders_text = "\n\n".join(reminder_lines)
+            footer = f"\n\n_Total: {len(reminders)} recordatorios pendientes_"
+            
+            await update.message.reply_text(
+                f"{header}\n\n{reminders_text}{footer}",
+                parse_mode="Markdown"
+            )
+                
+        except Exception as e:
+            logger.error(f"Error listing reminders: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+    
+    def _parse_reminder_datetime(self, date_str: str, time_str: str) -> datetime:
+        """
+        Parse date and time strings into a datetime object
+        
+        Args:
+            date_str: Date string (e.g., '25/07', 'tomorrow', 'today')
+            time_str: Time string (e.g., '15:30')
+            
+        Returns:
+            Parsed datetime object
+            
+        Raises:
+            ValueError: If date or time format is invalid
+        """
+        # Parse time first
+        time_match = re.match(r'^(\d{1,2}):(\d{2})$', time_str)
+        if not time_match:
+            raise ValueError(f"Formato de hora inválido: {time_str}. Usa formato HH:MM (24h)")
+        
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        
+        if hour < 0 or hour > 23:
+            raise ValueError(f"Hora inválida: {hour}. Debe estar entre 0 y 23")
+        
+        if minute < 0 or minute > 59:
+            raise ValueError(f"Minutos inválidos: {minute}. Deben estar entre 0 y 59")
+        
+        # Parse date
+        today = datetime.now()
+        target_date = None
+        
+        # Check for special date keywords
+        if date_str.lower() == 'today' or date_str.lower() == 'hoy':
+            target_date = today
+        elif date_str.lower() == 'tomorrow' or date_str.lower() == 'mañana' or date_str.lower() == 'manana':
+            target_date = today + timedelta(days=1)
+        else:
+            # Try to parse as DD/MM or DD/MM/YY or DD/MM/YYYY
+            date_formats = [
+                (r'^(\d{1,2})/(\d{1,2})$', '%d/%m/%Y'),  # DD/MM format
+                (r'^(\d{1,2})/(\d{1,2})/(\d{2})$', '%d/%m/%y'),  # DD/MM/YY format
+                (r'^(\d{1,2})/(\d{1,2})/(\d{4})$', '%d/%m/%Y')  # DD/MM/YYYY format
+            ]
+            
+            parsed = False
+            for pattern, fmt in date_formats:
+                if re.match(pattern, date_str):
+                    try:
+                        if fmt == '%d/%m/%Y' and len(date_str.split('/')) == 2:
+                            # For DD/MM format, add current year
+                            parts = date_str.split('/')
+                            date_str = f"{parts[0]}/{parts[1]}/{today.year}"
+                        
+                        parsed_date = datetime.strptime(date_str, fmt)
+                        # Set year to current year if not specified
+                        if fmt == '%d/%m/%Y':
+                            target_date = parsed_date.replace(year=today.year)
+                        else:
+                            target_date = parsed_date
+                        
+                        parsed = True
+                        break
+                    except ValueError:
+                        continue
+            
+            if not parsed:
+                raise ValueError(f"Formato de fecha inválido: {date_str}. Usa DD/MM o 'tomorrow'")
+        
+        # If the date is in the past (e.g., specifying a day that already passed this year)
+        # then assume the next year
+        result_datetime = target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if result_datetime < today and date_str.lower() not in ['today', 'hoy']:
+            result_datetime = result_datetime.replace(year=today.year + 1)
+        
+        return result_datetime
     
     async def handle_tag(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
@@ -1092,6 +1558,14 @@ def register_command_handlers(application):
     application.add_handler(TelegramCommandHandler("save", handler.handle_save))
     application.add_handler(TelegramCommandHandler("savedmessages", handler.handle_savedmessages))
     
+    # Register reminder commands
+    application.add_handler(TelegramCommandHandler("remind", handler.handle_remind))
+    application.add_handler(TelegramCommandHandler("reminders", handler.handle_reminders))
+    
+    # Register inactive user management commands
+    application.add_handler(TelegramCommandHandler("setinactive", handler.handle_setinactive))
+    application.add_handler(TelegramCommandHandler("disableinactive", handler.handle_disableinactive))
+    
     # Register commands in the handler's registry
     handler.register_command("start", handler.handle_start)
     handler.register_command("rules", handler.handle_rules)
@@ -1107,5 +1581,7 @@ def register_command_handlers(application):
     handler.register_command("searchtag", handler.handle_searchtag)
     handler.register_command("save", handler.handle_save)
     handler.register_command("savedmessages", handler.handle_savedmessages)
+    handler.register_command("remind", handler.handle_remind)
+    handler.register_command("reminders", handler.handle_reminders)
     
     logger.info("Command handlers registered successfully")
