@@ -1,5 +1,5 @@
-python-telegram-bot==22.3
+python-telegram-bot[job-queue]==22.3
 python-dotenv==1.0.1
 pytest==8.4.1
 pytest-asyncio==1.1.0
-pandas==2.2.2
+pandas>=2.2.3

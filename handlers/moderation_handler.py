@@ -474,9 +474,9 @@ def register_moderation_handlers(application, theme_engine: ThemeEngine):
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            moderation_handler.check_spam_message,
-            group=1  # Higher group number means lower priority
-        )
+            moderation_handler.check_spam_message
+        ),
+        group=1  # Higher group number means lower priority
     )
     
     logger.info("Moderation handlers registered successfully")

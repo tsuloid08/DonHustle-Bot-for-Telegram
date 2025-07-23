@@ -394,13 +394,18 @@ def setup_scheduler(application: Application, theme_engine: ThemeEngine):
     """
     scheduler = BotScheduler(application, theme_engine)
     
-    # Start scheduler when bot starts
-    application.job_queue.run_once(
-        lambda context: asyncio.create_task(scheduler.start()), 
-        when=10  # Start after 10 seconds
-    )
+    # Check if job queue is available
+    if application.job_queue is not None:
+        # Start scheduler when bot starts (use async function instead of create_task)
+        async def start_scheduler_callback(context):
+            await scheduler.start()
+        
+        application.job_queue.run_once(start_scheduler_callback, when=10)
+    else:
+        # Start scheduler manually without job queue
+        logger.warning("JobQueue not available. Scheduler will be started manually later.")
     
-    # Register shutdown handler
-    application.add_shutdown_callback(scheduler.stop)
+    # Register shutdown handler - we'll handle this in the main bot file instead
+    # application.post_shutdown = scheduler.stop
     
     return scheduler

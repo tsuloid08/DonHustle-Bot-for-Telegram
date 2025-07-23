@@ -119,6 +119,26 @@ class CommandHandler:
         self.file_processor = FileProcessor(self.theme_engine)
         self._command_registry = {}
     
+    def _load_chat_style(self, chat_id: int) -> None:
+        """
+        Load and apply the bot style configuration for a specific chat
+        
+        Args:
+            chat_id: Chat ID to load style for
+        """
+        try:
+            style_config = self.config_repository.get_config(chat_id, "bot_style", "serio")
+            
+            if style_config == "humorístico":
+                self.theme_engine.set_tone(ToneStyle.HUMOROUS)
+            else:
+                self.theme_engine.set_tone(ToneStyle.SERIOUS)
+                
+        except Exception as e:
+            logger.error(f"Error loading chat style for {chat_id}: {e}")
+            # Default to serious tone on error
+            self.theme_engine.set_tone(ToneStyle.SERIOUS)
+    
     async def handle_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Handle /start command - introduction and help information
@@ -128,6 +148,9 @@ class CommandHandler:
         
         if not user or not chat:
             return
+        
+        # Load chat-specific style configuration
+        self._load_chat_style(chat.id)
         
         # Different welcome for private vs group chats
         if chat.type == "private":
@@ -166,6 +189,10 @@ class CommandHandler:
         Handle /rules command - display group rules with hustle culture principles
         """
         chat_id = update.effective_chat.id if update.effective_chat else None
+        
+        if chat_id:
+            # Load chat-specific style configuration
+            self._load_chat_style(chat_id)
         
         # Try to get custom rules from database if available
         custom_rules = None
@@ -646,6 +673,122 @@ class CommandHandler:
             error_message = self.theme_engine.generate_message(MessageType.ERROR)
             await update.message.reply_text(error_message, parse_mode="Markdown")
     
+    async def handle_setstyle(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """
+        Handle /setstyle command - adjust bot tone (serious/humorous)
+        """
+        chat = update.effective_chat
+        user = update.effective_user
+        
+        if not chat or not user:
+            return
+        
+        # Load current chat-specific style configuration
+        self._load_chat_style(chat.id)
+        
+        # Check if user is admin in group chat
+        if chat.type != "private":
+            try:
+                chat_member = await context.bot.get_chat_member(chat.id, user.id)
+                if chat_member.status not in ["creator", "administrator"]:
+                    warning_message = self.theme_engine.generate_message(
+                        MessageType.WARNING,
+                        name=user.first_name
+                    )
+                    await update.message.reply_text(
+                        f"{warning_message}\n\nSolo los administradores pueden cambiar el estilo del bot.",
+                        parse_mode="Markdown"
+                    )
+                    return
+            except Exception as e:
+                logger.error(f"Error checking admin status: {e}")
+                return
+        
+        if not context.args:
+            # Show current style
+            try:
+                current_style = self.config_repository.get_config(
+                    chat.id, 
+                    "bot_style", 
+                    "serio"  # Default style
+                )
+                
+                current_tone = self.theme_engine.get_tone()
+                tone_display = "Serio" if current_tone == ToneStyle.SERIOUS else "Humorístico"
+                
+                if self.theme_engine.get_tone() == ToneStyle.SERIOUS:
+                    info_message = f"🎭 *ESTILO ACTUAL DEL BOT*\n\nTono configurado: *{tone_display}*"
+                else:
+                    info_message = f"🎭 *¿CÓMO HABLA LA FAMILIA?*\n\nActualmente uso el tono: *{tone_display}*"
+                
+                await update.message.reply_text(
+                    f"{info_message}\n\nPara cambiar el estilo, usa: `/setstyle [serio/humorístico]`\n\n_Ejemplo: /setstyle humorístico_",
+                    parse_mode="Markdown"
+                )
+                
+            except Exception as e:
+                logger.error(f"Error getting bot style: {e}")
+                error_message = self.theme_engine.generate_message(MessageType.ERROR)
+                await update.message.reply_text(error_message, parse_mode="Markdown")
+            return
+        
+        try:
+            style_arg = context.args[0].lower().strip()
+            
+            # Validate style argument
+            valid_styles = {
+                "serio": ToneStyle.SERIOUS,
+                "serious": ToneStyle.SERIOUS,
+                "humorístico": ToneStyle.HUMOROUS,
+                "humoristico": ToneStyle.HUMOROUS,
+                "humorous": ToneStyle.HUMOROUS,
+                "divertido": ToneStyle.HUMOROUS,
+                "gracioso": ToneStyle.HUMOROUS
+            }
+            
+            if style_arg not in valid_styles:
+                error_msg = self.theme_engine.format_error_with_suggestion(
+                    f"Estilo no reconocido: '{style_arg}'",
+                    "Usa 'serio' o 'humorístico' para configurar el tono del bot"
+                )
+                await update.message.reply_text(error_msg, parse_mode="Markdown")
+                return
+            
+            new_tone = valid_styles[style_arg]
+            
+            # Update theme engine tone
+            self.theme_engine.set_tone(new_tone)
+            
+            # Save the new style to database
+            style_value = "serio" if new_tone == ToneStyle.SERIOUS else "humorístico"
+            self.config_repository.set_config(chat.id, "bot_style", style_value)
+            
+            # Generate success message with new tone
+            success_message = self.theme_engine.generate_message(MessageType.SUCCESS)
+            
+            tone_display = "Serio" if new_tone == ToneStyle.SERIOUS else "Humorístico"
+            
+            if new_tone == ToneStyle.SERIOUS:
+                style_message = f"Estilo configurado a: *{tone_display}*\n\nLa familia ahora hablará con más seriedad y respeto."
+            else:
+                style_message = f"¡Estilo configurado a: *{tone_display}*!\n\n¡Ahora la familia será más divertida y relajada!"
+            
+            await update.message.reply_text(
+                f"{success_message}\n\n{style_message}",
+                parse_mode="Markdown"
+            )
+            
+        except IndexError:
+            error_msg = self.theme_engine.format_error_with_suggestion(
+                "No especificaste el estilo",
+                "Usa /setstyle [serio/humorístico] para cambiar el tono del bot"
+            )
+            await update.message.reply_text(error_msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error setting bot style: {e}")
+            error_message = self.theme_engine.generate_message(MessageType.ERROR)
+            await update.message.reply_text(error_message, parse_mode="Markdown")
+
     async def handle_uploadquotes(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
         Handle /uploadquotes command - process uploaded quote files
@@ -2104,6 +2247,9 @@ def register_command_handlers(application):
     application.add_handler(TelegramCommandHandler("customcommands", handler.handle_customcommands))
     application.add_handler(TelegramCommandHandler("deletecommand", handler.handle_deletecommand))
     
+    # Register bot configuration commands
+    application.add_handler(TelegramCommandHandler("setstyle", handler.handle_setstyle))
+    
     # Register commands in the handler's registry
     handler.register_command("start", handler.handle_start)
     handler.register_command("rules", handler.handle_rules)
@@ -2125,6 +2271,7 @@ def register_command_handlers(application):
     handler.register_command("addcommand", handler.handle_addcommand)
     handler.register_command("customcommands", handler.handle_customcommands)
     handler.register_command("deletecommand", handler.handle_deletecommand)
+    handler.register_command("setstyle", handler.handle_setstyle)
     
     logger.info("Command handlers registered successfully")
     

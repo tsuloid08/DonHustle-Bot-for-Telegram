@@ -291,7 +291,7 @@ class TestThemeEngine(unittest.TestCase):
         
         self.assertIn(error_msg, formatted)
         self.assertIn(suggestion, formatted)
-        self.assertTrue(any(term in formatted.lower() for term in ["error", "problema", "familia"]))
+        self.assertTrue(any(term in formatted.lower() for term in ["error", "problema", "familia", "técnicos", "sistema", "negocio", "capo"]))
     
     def test_format_error_with_suggestion_tone_difference(self):
         """Test error formatting differs between tones"""

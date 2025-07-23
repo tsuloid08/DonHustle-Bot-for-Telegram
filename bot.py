@@ -7,9 +7,14 @@ Main application entry point
 import os
 import sys
 import logging
+import asyncio
 from dotenv import load_dotenv
 from telegram.ext import Application, Defaults
 from telegram.constants import ParseMode
+
+# Fix Windows event loop policy
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Import handlers
 from handlers import register_command_handlers, register_error_handler, register_welcome_handlers, register_moderation_handlers
@@ -33,7 +38,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def setup_handlers(application):
+def setup_handlers(application):
     """
     Set up all handlers for the bot application
     
@@ -43,12 +48,11 @@ async def setup_handlers(application):
     # Create theme engine for handlers
     theme_engine = ThemeEngine(ToneStyle.SERIOUS)
     
+    # Store theme engine reference in application for access by handlers
+    application.bot_data['theme_engine'] = theme_engine
+    
     # Register command handlers
     command_handler = register_command_handlers(application)
-    
-    # Load and register existing custom commands
-    if command_handler:
-        await command_handler.load_and_register_custom_commands(application)
     
     # Register message handlers for automatic quotes
     register_message_handlers(application, theme_engine)
@@ -62,10 +66,15 @@ async def setup_handlers(application):
     # Register error handler
     register_error_handler(application)
     
-    # Set up reminder scheduler
-    setup_scheduler(application, theme_engine)
+    # Set up reminder scheduler (simplified to avoid event loop conflicts)
+    try:
+        scheduler = setup_scheduler(application, theme_engine)
+        application.bot_data['scheduler'] = scheduler
+    except Exception as e:
+        logger.warning(f"Scheduler setup failed: {e}. Continuing without scheduler.")
     
     logger.info("All handlers registered successfully")
+    return command_handler
 
 
 def initialize_bot():
@@ -116,45 +125,38 @@ def initialize_bot():
 
 async def main():
     """Main function to initialize and run the bot"""
-    try:
-        # Initialize the bot
-        application = initialize_bot()
+    # Initialize the bot
+    application = initialize_bot()
+    
+    if not application:
+        logger.error("Bot initialization failed. Exiting.")
+        return
+    
+    # Set up all handlers
+    command_handler = setup_handlers(application)
+    
+    # The application context manager will handle initialization and shutdown
+    async with application:
+        # Load custom commands asynchronously
+        if command_handler:
+            try:
+                await command_handler.load_and_register_custom_commands(application)
+            except Exception as e:
+                logger.error(f"Error loading custom commands: {e}")
         
-        if not application:
-            logger.error("Bot initialization failed. Exiting.")
-            return
+        logger.info("All handlers registered successfully")
         
-        # Set up all handlers (including loading custom commands)
-        await setup_handlers(application)
+        logger.info("Starting @donhustlebot...")
+        allowed_updates = ["message", "edited_message", "callback_query", "chat_member"]
         
-        # Log startup information
-        logger.info("Starting @donhustle_bot...")
+        # Start polling
+        await application.start()
+        if application.updater:
+            await application.updater.start_polling(allowed_updates=allowed_updates)
         
-        # Register shutdown handler
-        application.post_shutdown = close_database
-        
-        # Start the bot with appropriate update types
-        allowed_updates = [
-            "message", 
-            "edited_message", 
-            "callback_query", 
-            "chat_member"
-        ]
-        
-        logger.info(f"Starting bot polling with updates: {', '.join(allowed_updates)}")
-        await application.run_polling(allowed_updates=allowed_updates)
-        
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Unhandled exception: {e}")
-        logger.exception("Error details:")
-    finally:
-        # Ensure database is closed
-        close_database()
-        logger.info("Bot shutdown complete")
+        # Keep the bot running until it's stopped
+        await asyncio.Future()
 
 
 if __name__ == '__main__':
-    import asyncio
     asyncio.run(main())
